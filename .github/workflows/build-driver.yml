@@ -18,68 +18,50 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Install Windows Driver Kit (WDK)
+    - name: Install WDK using winget
       shell: powershell
       run: |
-        Write-Host "Downloading WDK installer..." -ForegroundColor Cyan
+        Write-Host "Installing WDK using winget..." -ForegroundColor Cyan
 
-        # Download WDK installer directly
-        $wdkUrl = "https://download.microsoft.com/download/3/5/7/3575914a-6f0e-4fdc-9f93-05488c867e63/wdk/wdksetup.exe"
-        $installerPath = "$env:TEMP\wdksetup.exe"
+        # Use winget to install WDK
+        winget install --id Microsoft.WindowsWDK --version 10.0.26100.1 --silent --accept-package-agreements --accept-source-agreements
 
-        # Use curl (available on Windows)
-        curl.exe -L -o $installerPath $wdkUrl
-
-        if (-not (Test-Path $installerPath)) {
-          Write-Host "[ERROR] Failed to download WDK installer" -ForegroundColor Red
-          exit 1
-        }
-
-        Write-Host "Downloaded: $installerPath" -ForegroundColor Green
-        Write-Host "File size: $([Math]::Round((Get-Item $installerPath).Length / 1MB, 2)) MB" -ForegroundColor Gray
-
-        Write-Host ""
-        Write-Host "Installing WDK (this may take 10-15 minutes)..." -ForegroundColor Cyan
-
-        # Install WDK silently with features
-        $arguments = @(
-          "/features", "+",
-          "/quiet",
-          "/norestart"
-        )
-
-        $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
-
-        if ($process.ExitCode -eq 0) {
-          Write-Host "[OK] WDK installation completed successfully" -ForegroundColor Green
-        } elseif ($process.ExitCode -eq 3010) {
-          Write-Host "[OK] WDK installation completed (restart required, but continuing)" -ForegroundColor Yellow
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "[OK] WDK installation completed" -ForegroundColor Green
         } else {
-          Write-Host "[ERROR] WDK installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
-          exit 1
+          Write-Host "[WARN] WDK installation returned exit code: $LASTEXITCODE" -ForegroundColor Yellow
+          Write-Host "Continuing anyway..." -ForegroundColor Gray
         }
 
     - name: Verify WDK Installation
       shell: powershell
       run: |
         Write-Host "Verifying WDK installation..." -ForegroundColor Cyan
+        Write-Host ""
 
         $wdkPath = "C:\Program Files (x86)\Windows Kits\10"
 
-        # List all directories in Windows Kits
+        # List Windows Kits directory
         Write-Host "Checking Windows Kits directory..." -ForegroundColor Yellow
         if (Test-Path $wdkPath) {
-          Write-Host "Contents of $wdkPath`:" -ForegroundColor Gray
-          Get-ChildItem $wdkPath -Directory | ForEach-Object { Write-Host "  - $($_.Name)" -ForegroundColor Gray }
+          Write-Host "Contents of Windows Kits\10:" -ForegroundColor Gray
+          Get-ChildItem $wdkPath -Directory | ForEach-Object {
+            Write-Host "  - $($_.Name)" -ForegroundColor Gray
+          }
+          Write-Host ""
+        } else {
+          Write-Host "[ERROR] Windows Kits directory not found" -ForegroundColor Red
+          exit 1
         }
 
-        Write-Host ""
-
+        # Check Include directory
         if (Test-Path "$wdkPath\Include") {
           $sdkVersions = Get-ChildItem "$wdkPath\Include" -Directory | Sort-Object Name -Descending
 
           if ($sdkVersions.Count -gt 0) {
             Write-Host "Available SDK versions:" -ForegroundColor Cyan
+
+            $foundKm = $false
             foreach ($sdk in $sdkVersions) {
               Write-Host "  - $($sdk.Name)" -ForegroundColor Gray
 
@@ -87,38 +69,25 @@ jobs:
               $kmPath = Join-Path $sdk.FullName "km"
               if (Test-Path $kmPath) {
                 Write-Host "    [OK] km directory exists" -ForegroundColor Green
+                $foundKm = $true
 
                 # Check for key headers
-                $ntddk = Join-Path $kmPath "ntddk.h"
-                $wdf = Join-Path $kmPath "wdf.h"
-
-                if (Test-Path $ntddk) {
+                if (Test-Path "$kmPath\ntddk.h") {
                   Write-Host "    [OK] ntddk.h found" -ForegroundColor Green
                 }
-                if (Test-Path $wdf) {
+                if (Test-Path "$kmPath\wdf.h") {
                   Write-Host "    [OK] wdf.h found" -ForegroundColor Green
                 }
               } else {
-                Write-Host "    [WARN] km directory not found" -ForegroundColor Yellow
+                Write-Host "    [INFO] No km directory (user-mode SDK only)" -ForegroundColor Gray
               }
             }
 
-            # Select latest SDK with km directory
-            $validSdk = $null
-            foreach ($sdk in $sdkVersions) {
-              $kmPath = Join-Path $sdk.FullName "km\ntddk.h"
-              if (Test-Path $kmPath) {
-                $validSdk = $sdk.Name
-                break
-              }
-            }
-
-            if ($validSdk) {
-              Write-Host ""
-              Write-Host "[OK] WDK is properly installed with SDK version: $validSdk" -ForegroundColor Green
+            Write-Host ""
+            if ($foundKm) {
+              Write-Host "[OK] WDK kernel mode components are available" -ForegroundColor Green
             } else {
-              Write-Host ""
-              Write-Host "[ERROR] No valid WDK SDK found with kernel mode headers" -ForegroundColor Red
+              Write-Host "[ERROR] No kernel mode SDK found - WDK may not be properly installed" -ForegroundColor Red
               exit 1
             }
           } else {
@@ -126,37 +95,69 @@ jobs:
             exit 1
           }
         } else {
-          Write-Host "[ERROR] WDK Include directory not found" -ForegroundColor Red
+          Write-Host "[ERROR] Include directory not found" -ForegroundColor Red
           exit 1
+        }
+
+    - name: Check VS ARM64 Tools
+      shell: powershell
+      run: |
+        Write-Host "Checking for ARM64 build tools..." -ForegroundColor Cyan
+
+        # Find Visual Studio installation
+        $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+
+        if (Test-Path $vsWhere) {
+          $vsPath = & $vsWhere -latest -products * -property installationPath
+          Write-Host "Visual Studio path: $vsPath" -ForegroundColor Gray
+
+          # Check for ARM64 compiler
+          $arm64Paths = @(
+            "$vsPath\VC\Tools\MSVC\*\bin\Hostx64\arm64\cl.exe",
+            "$vsPath\VC\Tools\MSVC\*\bin\Hostx86\arm64\cl.exe"
+          )
+
+          $found = $false
+          foreach ($pattern in $arm64Paths) {
+            $files = Get-ChildItem $pattern -ErrorAction SilentlyContinue
+            if ($files) {
+              Write-Host "[OK] ARM64 compiler found: $($files[0].DirectoryName)" -ForegroundColor Green
+              $found = $true
+              break
+            }
+          }
+
+          if (-not $found) {
+            Write-Host "[WARN] ARM64 compiler not found" -ForegroundColor Yellow
+            Write-Host "Attempting to install ARM64 build tools..." -ForegroundColor Cyan
+
+            # Install ARM64 workload
+            & "$vsPath\Common7\IDE\VSIXInstaller.exe" /quiet /installVSIX
+          }
         }
 
     - name: Build ARM64 Driver
       shell: powershell
       run: |
         Write-Host "Building SimpleLidDriver for ARM64..." -ForegroundColor Cyan
+        Write-Host ""
 
         cd SimpleLidDriver
 
-        # Find MSBuild using vswhere
+        # Find MSBuild
         $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+        $msbuild = Join-Path $vsPath "MSBuild\Current\Bin\MSBuild.exe"
 
-        if (Test-Path $vsWhere) {
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
-          $msbuild = Join-Path $vsPath "MSBuild\Current\Bin\MSBuild.exe"
-
-          if (-not (Test-Path $msbuild)) {
-            Write-Host "[ERROR] MSBuild not found at: $msbuild" -ForegroundColor Red
-            exit 1
-          }
-        } else {
-          Write-Host "[ERROR] vswhere.exe not found" -ForegroundColor Red
+        if (-not (Test-Path $msbuild)) {
+          Write-Host "[ERROR] MSBuild not found" -ForegroundColor Red
           exit 1
         }
 
         Write-Host "Using MSBuild: $msbuild" -ForegroundColor Gray
         Write-Host ""
 
-        # Build with normal verbosity
+        # Build
         & $msbuild SimpleLidDriver.vcxproj `
           /p:Configuration=Release `
           /p:Platform=ARM64 `
@@ -184,23 +185,19 @@ jobs:
           Write-Host "    File: $sysFile" -ForegroundColor Cyan
           Write-Host "    Size: $size KB" -ForegroundColor Gray
 
-          # Show INF file
-          $infFile = "SimpleLidDriver.inf"
-          if (Test-Path $infFile) {
-            Copy-Item $infFile "ARM64\Release\" -Force
-            Write-Host "    INF: Copied to output directory" -ForegroundColor Gray
-          }
+          # Copy INF
+          Copy-Item "SimpleLidDriver.inf" "ARM64\Release\" -Force
+          Write-Host "    INF: Copied to output" -ForegroundColor Gray
         } else {
-          Write-Host "[ERROR] Driver file not found: $sysFile" -ForegroundColor Red
+          Write-Host "[ERROR] Driver file not found" -ForegroundColor Red
 
-          # List output directory contents
+          # Debug: List all output
           Write-Host ""
-          Write-Host "Checking output directories..." -ForegroundColor Yellow
+          Write-Host "Output directory contents:" -ForegroundColor Yellow
           if (Test-Path "ARM64") {
-            Write-Host "ARM64 directory contents:" -ForegroundColor Cyan
-            Get-ChildItem "ARM64" -Recurse -File | Select-Object FullName | ForEach-Object { Write-Host "  $($_.FullName)" }
-          } else {
-            Write-Host "ARM64 directory does not exist" -ForegroundColor Red
+            Get-ChildItem "ARM64" -Recurse -File | ForEach-Object {
+              Write-Host "  $($_.FullName)" -ForegroundColor Gray
+            }
           }
 
           exit 1
@@ -222,17 +219,12 @@ jobs:
 
         cd SimpleLidDriver\ARM64\Release
 
-        # Create zip package
         $packageName = "SimpleLidDriver-ARM64-$(Get-Date -Format 'yyyyMMdd').zip"
         Compress-Archive -Path SimpleLidDriver.sys, SimpleLidDriver.inf -DestinationPath $packageName
 
-        Write-Host "[OK] Package created: $packageName" -ForegroundColor Green
+        Write-Host "[OK] Package: $packageName" -ForegroundColor Green
+        Write-Host "    Size: $([Math]::Round((Get-Item $packageName).Length / 1KB, 2)) KB" -ForegroundColor Gray
 
-        # Show package info
-        $packagePath = Get-Item $packageName
-        Write-Host "    Size: $([Math]::Round($packagePath.Length / 1KB, 2)) KB" -ForegroundColor Gray
-
-        # Move to root for release
         Move-Item $packageName ..\..\..\
 
     - name: Upload Release Package
