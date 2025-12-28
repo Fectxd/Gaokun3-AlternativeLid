@@ -1,0 +1,34 @@
+# Build outputs
+ARM64/
+x64/
+*.obj
+*.pdb
+*.log
+*.tlog
+*.idb
+*.ilk
+*.exp
+*.lib
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sln
+
+# Driver package files
+*.cer
+*.cat
+*.dvl.xml
+
+# Temporary files
+*.tmp
+*~
+temp/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# PowerShell
+*.ps1.log

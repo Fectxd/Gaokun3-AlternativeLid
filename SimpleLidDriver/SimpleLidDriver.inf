@@ -1,0 +1,67 @@
+;
+; SimpleLidDriver.inf
+; 超简单的盖子驱动 - 直接替换 ACPI\ID9001
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+CatalogFile=SimpleLidDriver.cat
+DriverVer=01/27/2025,1.0.0.0
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+SimpleLidDriver.sys = 1,,
+
+;*****************************************
+; 安装段
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%SimpleLidDriver.DeviceDesc%=SimpleLidDriver_Device, ACPI\ID9001
+
+[SimpleLidDriver_Device.NT]
+CopyFiles=Drivers_Dir
+
+[Drivers_Dir]
+SimpleLidDriver.sys
+
+;-------------- 服务安装
+[SimpleLidDriver_Device.NT.Services]
+AddService = SimpleLidDriver,%SPSVCINST_ASSOCSERVICE%, SimpleLidDriver_Service_Inst
+
+[SimpleLidDriver_Service_Inst]
+DisplayName    = %SimpleLidDriver.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\SimpleLidDriver.sys
+
+;-------------- WDF 段
+[SimpleLidDriver_Device.NT.Wdf]
+KmdfService = SimpleLidDriver, SimpleLidDriver_wdfsect
+
+[SimpleLidDriver_wdfsect]
+KmdfLibraryVersion = 1.15
+
+;*****************************************
+; 字符串
+;*****************************************
+
+[Strings]
+SPSVCINST_ASSOCSERVICE= 0x00000002
+ManufacturerName="Custom Driver"
+DiskName = "SimpleLidDriver Installation Disk"
+SimpleLidDriver.DeviceDesc = "Simple Lid Driver (Disabled)"
+SimpleLidDriver.SVCDESC = "Simple Lid Driver Service"

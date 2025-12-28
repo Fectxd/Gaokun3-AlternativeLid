@@ -1,0 +1,150 @@
+name: Build ARM64 Driver
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Install Windows Driver Kit (WDK)
+      shell: powershell
+      run: |
+        Write-Host "Downloading WDK..." -ForegroundColor Cyan
+
+        # Download WDK installer
+        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272385"
+        $installerPath = "$env:TEMP\wdksetup.exe"
+
+        Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
+
+        Write-Host "Installing WDK..." -ForegroundColor Cyan
+
+        # Install WDK silently
+        Start-Process -FilePath $installerPath -ArgumentList "/quiet", "/norestart" -Wait
+
+        Write-Host "WDK installation completed" -ForegroundColor Green
+
+    - name: Verify WDK Installation
+      shell: powershell
+      run: |
+        Write-Host "Verifying WDK installation..." -ForegroundColor Cyan
+
+        $wdkPath = "C:\Program Files (x86)\Windows Kits\10"
+
+        if (Test-Path "$wdkPath\Include") {
+          $sdkVersions = Get-ChildItem "$wdkPath\Include" -Directory | Sort-Object Name -Descending
+          $latestSdk = $sdkVersions[0].Name
+          Write-Host "Latest SDK version: $latestSdk" -ForegroundColor Green
+
+          # Check for km headers
+          $kmPath = "$wdkPath\Include\$latestSdk\km"
+          if (Test-Path "$kmPath\ntddk.h") {
+            Write-Host "[OK] ntddk.h found" -ForegroundColor Green
+          } else {
+            Write-Host "[ERROR] ntddk.h not found" -ForegroundColor Red
+            exit 1
+          }
+
+          if (Test-Path "$kmPath\wdf.h") {
+            Write-Host "[OK] wdf.h found" -ForegroundColor Green
+          } else {
+            Write-Host "[ERROR] wdf.h not found" -ForegroundColor Red
+            exit 1
+          }
+        } else {
+          Write-Host "[ERROR] WDK Include directory not found" -ForegroundColor Red
+          exit 1
+        }
+
+    - name: Build ARM64 Driver
+      shell: powershell
+      run: |
+        Write-Host "Building SimpleLidDriver for ARM64..." -ForegroundColor Cyan
+
+        cd SimpleLidDriver
+
+        # Find MSBuild
+        $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+
+        if (-not (Test-Path $msbuild)) {
+          Write-Host "Searching for MSBuild..." -ForegroundColor Yellow
+          $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          $msbuild = Join-Path $vsPath "MSBuild\Current\Bin\MSBuild.exe"
+        }
+
+        Write-Host "Using MSBuild: $msbuild" -ForegroundColor Gray
+
+        # Build
+        & $msbuild SimpleLidDriver.vcxproj `
+          /p:Configuration=Release `
+          /p:Platform=ARM64 `
+          /v:minimal
+
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "Build failed!" -ForegroundColor Red
+          exit $LASTEXITCODE
+        }
+
+        Write-Host "Build successful!" -ForegroundColor Green
+
+    - name: Verify Build Output
+      shell: powershell
+      run: |
+        cd SimpleLidDriver
+
+        $sysFile = "ARM64\Release\SimpleLidDriver.sys"
+
+        if (Test-Path $sysFile) {
+          $size = [Math]::Round((Get-Item $sysFile).Length / 1KB, 2)
+          Write-Host "[OK] Driver built successfully" -ForegroundColor Green
+          Write-Host "    File: $sysFile" -ForegroundColor Cyan
+          Write-Host "    Size: $size KB" -ForegroundColor Gray
+        } else {
+          Write-Host "[ERROR] Driver file not found" -ForegroundColor Red
+          exit 1
+        }
+
+    - name: Upload Driver Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: SimpleLidDriver-ARM64
+        path: |
+          SimpleLidDriver/ARM64/Release/SimpleLidDriver.sys
+          SimpleLidDriver/ARM64/Release/SimpleLidDriver.inf
+        retention-days: 90
+
+    - name: Create Release Package
+      shell: powershell
+      run: |
+        Write-Host "Creating release package..." -ForegroundColor Cyan
+
+        cd SimpleLidDriver\ARM64\Release
+
+        # Create zip package
+        $packageName = "SimpleLidDriver-ARM64-$(Get-Date -Format 'yyyyMMdd').zip"
+        Compress-Archive -Path SimpleLidDriver.sys, SimpleLidDriver.inf -DestinationPath $packageName
+
+        Write-Host "Package created: $packageName" -ForegroundColor Green
+
+        # Move to root for release
+        Move-Item $packageName ..\..\..\
+
+    - name: Upload Release Package
+      uses: actions/upload-artifact@v4
+      with:
+        name: SimpleLidDriver-Release-Package
+        path: SimpleLidDriver-ARM64-*.zip
+        retention-days: 90
