@@ -21,12 +21,43 @@ jobs:
     - name: Install Windows Driver Kit (WDK)
       shell: powershell
       run: |
-        Write-Host "Installing WDK via Chocolatey..." -ForegroundColor Cyan
+        Write-Host "Downloading WDK installer..." -ForegroundColor Cyan
 
-        # Install WDK using Chocolatey
-        choco install windows-driver-kit -y --version=10.0.26100.1742
+        # Download WDK installer directly
+        $wdkUrl = "https://download.microsoft.com/download/3/5/7/3575914a-6f0e-4fdc-9f93-05488c867e63/wdk/wdksetup.exe"
+        $installerPath = "$env:TEMP\wdksetup.exe"
 
-        Write-Host "WDK installation completed" -ForegroundColor Green
+        # Use curl (available on Windows)
+        curl.exe -L -o $installerPath $wdkUrl
+
+        if (-not (Test-Path $installerPath)) {
+          Write-Host "[ERROR] Failed to download WDK installer" -ForegroundColor Red
+          exit 1
+        }
+
+        Write-Host "Downloaded: $installerPath" -ForegroundColor Green
+        Write-Host "File size: $([Math]::Round((Get-Item $installerPath).Length / 1MB, 2)) MB" -ForegroundColor Gray
+
+        Write-Host ""
+        Write-Host "Installing WDK (this may take 10-15 minutes)..." -ForegroundColor Cyan
+
+        # Install WDK silently with features
+        $arguments = @(
+          "/features", "+",
+          "/quiet",
+          "/norestart"
+        )
+
+        $process = Start-Process -FilePath $installerPath -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+
+        if ($process.ExitCode -eq 0) {
+          Write-Host "[OK] WDK installation completed successfully" -ForegroundColor Green
+        } elseif ($process.ExitCode -eq 3010) {
+          Write-Host "[OK] WDK installation completed (restart required, but continuing)" -ForegroundColor Yellow
+        } else {
+          Write-Host "[ERROR] WDK installation failed with exit code: $($process.ExitCode)" -ForegroundColor Red
+          exit 1
+        }
 
     - name: Verify WDK Installation
       shell: powershell
@@ -35,35 +66,67 @@ jobs:
 
         $wdkPath = "C:\Program Files (x86)\Windows Kits\10"
 
+        # List all directories in Windows Kits
+        Write-Host "Checking Windows Kits directory..." -ForegroundColor Yellow
+        if (Test-Path $wdkPath) {
+          Write-Host "Contents of $wdkPath`:" -ForegroundColor Gray
+          Get-ChildItem $wdkPath -Directory | ForEach-Object { Write-Host "  - $($_.Name)" -ForegroundColor Gray }
+        }
+
+        Write-Host ""
+
         if (Test-Path "$wdkPath\Include") {
           $sdkVersions = Get-ChildItem "$wdkPath\Include" -Directory | Sort-Object Name -Descending
+
           if ($sdkVersions.Count -gt 0) {
-            $latestSdk = $sdkVersions[0].Name
-            Write-Host "Latest SDK version: $latestSdk" -ForegroundColor Green
+            Write-Host "Available SDK versions:" -ForegroundColor Cyan
+            foreach ($sdk in $sdkVersions) {
+              Write-Host "  - $($sdk.Name)" -ForegroundColor Gray
 
-            # Check for km headers
-            $kmPath = "$wdkPath\Include\$latestSdk\km"
-            if (Test-Path "$kmPath\ntddk.h") {
-              Write-Host "[OK] ntddk.h found" -ForegroundColor Green
-            } else {
-              Write-Host "[WARN] ntddk.h not found, checking alternative paths..." -ForegroundColor Yellow
+              # Check for km directory
+              $kmPath = Join-Path $sdk.FullName "km"
+              if (Test-Path $kmPath) {
+                Write-Host "    [OK] km directory exists" -ForegroundColor Green
 
-              # List available SDK versions
-              Write-Host "Available SDK versions:" -ForegroundColor Cyan
-              Get-ChildItem "$wdkPath\Include" -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
+                # Check for key headers
+                $ntddk = Join-Path $kmPath "ntddk.h"
+                $wdf = Join-Path $kmPath "wdf.h"
+
+                if (Test-Path $ntddk) {
+                  Write-Host "    [OK] ntddk.h found" -ForegroundColor Green
+                }
+                if (Test-Path $wdf) {
+                  Write-Host "    [OK] wdf.h found" -ForegroundColor Green
+                }
+              } else {
+                Write-Host "    [WARN] km directory not found" -ForegroundColor Yellow
+              }
             }
+
+            # Select latest SDK with km directory
+            $validSdk = $null
+            foreach ($sdk in $sdkVersions) {
+              $kmPath = Join-Path $sdk.FullName "km\ntddk.h"
+              if (Test-Path $kmPath) {
+                $validSdk = $sdk.Name
+                break
+              }
+            }
+
+            if ($validSdk) {
+              Write-Host ""
+              Write-Host "[OK] WDK is properly installed with SDK version: $validSdk" -ForegroundColor Green
+            } else {
+              Write-Host ""
+              Write-Host "[ERROR] No valid WDK SDK found with kernel mode headers" -ForegroundColor Red
+              exit 1
+            }
+          } else {
+            Write-Host "[ERROR] No SDK versions found" -ForegroundColor Red
+            exit 1
           }
         } else {
           Write-Host "[ERROR] WDK Include directory not found" -ForegroundColor Red
-
-          # Check if WDK exists at all
-          if (Test-Path $wdkPath) {
-            Write-Host "WDK directory exists, contents:" -ForegroundColor Yellow
-            Get-ChildItem $wdkPath | Select-Object Name
-          } else {
-            Write-Host "WDK not installed at expected location" -ForegroundColor Red
-          }
-
           exit 1
         }
 
@@ -91,12 +154,13 @@ jobs:
         }
 
         Write-Host "Using MSBuild: $msbuild" -ForegroundColor Gray
+        Write-Host ""
 
-        # Build with detailed output for debugging
+        # Build with normal verbosity
         & $msbuild SimpleLidDriver.vcxproj `
           /p:Configuration=Release `
           /p:Platform=ARM64 `
-          /v:detailed
+          /v:normal
 
         if ($LASTEXITCODE -ne 0) {
           Write-Host ""
@@ -119,13 +183,22 @@ jobs:
           Write-Host "[OK] Driver built successfully" -ForegroundColor Green
           Write-Host "    File: $sysFile" -ForegroundColor Cyan
           Write-Host "    Size: $size KB" -ForegroundColor Gray
+
+          # Show INF file
+          $infFile = "SimpleLidDriver.inf"
+          if (Test-Path $infFile) {
+            Copy-Item $infFile "ARM64\Release\" -Force
+            Write-Host "    INF: Copied to output directory" -ForegroundColor Gray
+          }
         } else {
           Write-Host "[ERROR] Driver file not found: $sysFile" -ForegroundColor Red
 
           # List output directory contents
+          Write-Host ""
           Write-Host "Checking output directories..." -ForegroundColor Yellow
           if (Test-Path "ARM64") {
-            Get-ChildItem "ARM64" -Recurse | Select-Object FullName
+            Write-Host "ARM64 directory contents:" -ForegroundColor Cyan
+            Get-ChildItem "ARM64" -Recurse -File | Select-Object FullName | ForEach-Object { Write-Host "  $($_.FullName)" }
           } else {
             Write-Host "ARM64 directory does not exist" -ForegroundColor Red
           }
@@ -153,7 +226,11 @@ jobs:
         $packageName = "SimpleLidDriver-ARM64-$(Get-Date -Format 'yyyyMMdd').zip"
         Compress-Archive -Path SimpleLidDriver.sys, SimpleLidDriver.inf -DestinationPath $packageName
 
-        Write-Host "Package created: $packageName" -ForegroundColor Green
+        Write-Host "[OK] Package created: $packageName" -ForegroundColor Green
+
+        # Show package info
+        $packagePath = Get-Item $packageName
+        Write-Host "    Size: $([Math]::Round($packagePath.Length / 1KB, 2)) KB" -ForegroundColor Gray
 
         # Move to root for release
         Move-Item $packageName ..\..\..\
