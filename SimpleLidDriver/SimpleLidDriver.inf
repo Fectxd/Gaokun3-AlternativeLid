@@ -26,9 +26,12 @@ SimpleLidDriver.sys = 1,,
 ;*****************************************
 
 [Manufacturer]
-%ManufacturerName%=Standard,NTamd64
+%ManufacturerName%=Standard,NTamd64,NTARM64
 
 [Standard.NTamd64]
+%SimpleLidDriver.DeviceDesc%=SimpleLidDriver_Device, ACPI\ID9001
+
+[Standard.NTARM64]
 %SimpleLidDriver.DeviceDesc%=SimpleLidDriver_Device, ACPI\ID9001
 
 [SimpleLidDriver_Device.NT]
