@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
     - name: Checkout code
@@ -21,18 +21,10 @@ jobs:
     - name: Install Windows Driver Kit (WDK)
       shell: powershell
       run: |
-        Write-Host "Downloading WDK..." -ForegroundColor Cyan
+        Write-Host "Installing WDK via Chocolatey..." -ForegroundColor Cyan
 
-        # Download WDK installer
-        $wdkUrl = "https://go.microsoft.com/fwlink/?linkid=2272385"
-        $installerPath = "$env:TEMP\wdksetup.exe"
-
-        Invoke-WebRequest -Uri $wdkUrl -OutFile $installerPath
-
-        Write-Host "Installing WDK..." -ForegroundColor Cyan
-
-        # Install WDK silently
-        Start-Process -FilePath $installerPath -ArgumentList "/quiet", "/norestart" -Wait
+        # Install WDK using Chocolatey
+        choco install windows-driver-kit -y --version=10.0.26100.1742
 
         Write-Host "WDK installation completed" -ForegroundColor Green
 
@@ -45,26 +37,33 @@ jobs:
 
         if (Test-Path "$wdkPath\Include") {
           $sdkVersions = Get-ChildItem "$wdkPath\Include" -Directory | Sort-Object Name -Descending
-          $latestSdk = $sdkVersions[0].Name
-          Write-Host "Latest SDK version: $latestSdk" -ForegroundColor Green
+          if ($sdkVersions.Count -gt 0) {
+            $latestSdk = $sdkVersions[0].Name
+            Write-Host "Latest SDK version: $latestSdk" -ForegroundColor Green
 
-          # Check for km headers
-          $kmPath = "$wdkPath\Include\$latestSdk\km"
-          if (Test-Path "$kmPath\ntddk.h") {
-            Write-Host "[OK] ntddk.h found" -ForegroundColor Green
-          } else {
-            Write-Host "[ERROR] ntddk.h not found" -ForegroundColor Red
-            exit 1
-          }
+            # Check for km headers
+            $kmPath = "$wdkPath\Include\$latestSdk\km"
+            if (Test-Path "$kmPath\ntddk.h") {
+              Write-Host "[OK] ntddk.h found" -ForegroundColor Green
+            } else {
+              Write-Host "[WARN] ntddk.h not found, checking alternative paths..." -ForegroundColor Yellow
 
-          if (Test-Path "$kmPath\wdf.h") {
-            Write-Host "[OK] wdf.h found" -ForegroundColor Green
-          } else {
-            Write-Host "[ERROR] wdf.h not found" -ForegroundColor Red
-            exit 1
+              # List available SDK versions
+              Write-Host "Available SDK versions:" -ForegroundColor Cyan
+              Get-ChildItem "$wdkPath\Include" -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
+            }
           }
         } else {
           Write-Host "[ERROR] WDK Include directory not found" -ForegroundColor Red
+
+          # Check if WDK exists at all
+          if (Test-Path $wdkPath) {
+            Write-Host "WDK directory exists, contents:" -ForegroundColor Yellow
+            Get-ChildItem $wdkPath | Select-Object Name
+          } else {
+            Write-Host "WDK not installed at expected location" -ForegroundColor Red
+          }
+
           exit 1
         }
 
@@ -75,30 +74,38 @@ jobs:
 
         cd SimpleLidDriver
 
-        # Find MSBuild
-        $msbuild = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+        # Find MSBuild using vswhere
+        $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
 
-        if (-not (Test-Path $msbuild)) {
-          Write-Host "Searching for MSBuild..." -ForegroundColor Yellow
-          $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vsWhere) {
           $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
           $msbuild = Join-Path $vsPath "MSBuild\Current\Bin\MSBuild.exe"
+
+          if (-not (Test-Path $msbuild)) {
+            Write-Host "[ERROR] MSBuild not found at: $msbuild" -ForegroundColor Red
+            exit 1
+          }
+        } else {
+          Write-Host "[ERROR] vswhere.exe not found" -ForegroundColor Red
+          exit 1
         }
 
         Write-Host "Using MSBuild: $msbuild" -ForegroundColor Gray
 
-        # Build
+        # Build with detailed output for debugging
         & $msbuild SimpleLidDriver.vcxproj `
           /p:Configuration=Release `
           /p:Platform=ARM64 `
-          /v:minimal
+          /v:detailed
 
         if ($LASTEXITCODE -ne 0) {
-          Write-Host "Build failed!" -ForegroundColor Red
+          Write-Host ""
+          Write-Host "[ERROR] Build failed with exit code: $LASTEXITCODE" -ForegroundColor Red
           exit $LASTEXITCODE
         }
 
-        Write-Host "Build successful!" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "[SUCCESS] Build completed!" -ForegroundColor Green
 
     - name: Verify Build Output
       shell: powershell
@@ -113,7 +120,16 @@ jobs:
           Write-Host "    File: $sysFile" -ForegroundColor Cyan
           Write-Host "    Size: $size KB" -ForegroundColor Gray
         } else {
-          Write-Host "[ERROR] Driver file not found" -ForegroundColor Red
+          Write-Host "[ERROR] Driver file not found: $sysFile" -ForegroundColor Red
+
+          # List output directory contents
+          Write-Host "Checking output directories..." -ForegroundColor Yellow
+          if (Test-Path "ARM64") {
+            Get-ChildItem "ARM64" -Recurse | Select-Object FullName
+          } else {
+            Write-Host "ARM64 directory does not exist" -ForegroundColor Red
+          }
+
           exit 1
         }
 
